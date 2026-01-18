@@ -11,14 +11,12 @@ from typing import Any
 from config import (
     CODEX_EXE_PATH,
     DEFAULT_SANDBOX,
-    DEFAULT_TIMEOUT,
     SANDBOX_MODES,
     MAX_RETRIES,
     RETRY_DELAY,
 )
 from errors import (
     CodexExecutionError,
-    CodexTimeoutError,
     InvalidSandboxModeError,
 )
 from jsonl_parser import JsonlParser, ParsedResult
@@ -53,10 +51,8 @@ class CodexExecRunner:
     def __init__(
         self,
         codex_path: Path | None = None,
-        default_timeout: int = DEFAULT_TIMEOUT,
     ):
         self.codex_path = codex_path or CODEX_EXE_PATH
-        self.default_timeout = default_timeout
         self._validate_codex_path()
 
     def _validate_codex_path(self) -> None:
@@ -122,7 +118,6 @@ class CodexExecRunner:
         cwd: str | None = None,
         sandbox: str = DEFAULT_SANDBOX,
         model: str | None = None,
-        timeout: int | None = None,
         thread_id: str | None = None,
     ) -> ParsedResult:
         """Execute codex with automatic retry on disconnection."""
@@ -130,7 +125,6 @@ class CodexExecRunner:
             raise InvalidSandboxModeError(sandbox, SANDBOX_MODES)
 
         cwd = cwd or str(Path.cwd())
-        timeout = timeout or self.default_timeout
 
         last_error = None
         last_result = None
@@ -141,7 +135,7 @@ class CodexExecRunner:
                 await asyncio.sleep(RETRY_DELAY)
 
             try:
-                result = await self._execute_once(prompt, cwd, sandbox, model, timeout, thread_id)
+                result = await self._execute_once(prompt, cwd, sandbox, model, thread_id)
 
                 # Check if result has retryable errors but no completion
                 if result.errors and _is_retryable_error(result.errors) and not result.completed:
@@ -151,12 +145,6 @@ class CodexExecRunner:
                     continue
 
                 return result
-
-            except CodexTimeoutError as e:
-                logger.warning(f"Timeout on attempt {attempt + 1}: {e}")
-                last_error = e
-                # Don't retry on timeout - it's likely a persistent issue
-                raise
 
             except CodexExecutionError as e:
                 logger.warning(f"Execution error on attempt {attempt + 1}: {e}")
@@ -182,7 +170,6 @@ class CodexExecRunner:
         cwd: str,
         sandbox: str,
         model: str | None,
-        timeout: int,
         thread_id: str | None = None,
     ) -> ParsedResult:
         """Execute codex once (single attempt)."""
@@ -231,51 +218,45 @@ class CodexExecRunner:
             proc.stdin.close()
             await proc.stdin.wait_closed()
 
-            # Read output with timeout
-            try:
-                completion_event = asyncio.Event()
+            # Read output until completion
+            completion_event = asyncio.Event()
 
-                async def read_stream():
-                    while True:
-                        line = await proc.stdout.readline()
+            async def read_stream():
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    decoded = line.decode("utf-8", errors="replace")
+                    stdout_buffer.append(decoded)
+                    parser.parse_line(decoded)
+                    logger.debug(f"JSONL: {decoded.strip()}")
+                    # Stop reading once turn is completed
+                    if parser.result.completed:
+                        logger.info("Turn completed, stopping stream read")
+                        completion_event.set()
+                        break
+
+            async def read_stderr():
+                while not completion_event.is_set():
+                    try:
+                        line = await asyncio.wait_for(
+                            proc.stderr.readline(),
+                            timeout=0.5
+                        )
                         if not line:
                             break
-                        decoded = line.decode("utf-8", errors="replace")
-                        stdout_buffer.append(decoded)
-                        parser.parse_line(decoded)
-                        logger.debug(f"JSONL: {decoded.strip()}")
-                        # Stop reading once turn is completed
-                        if parser.result.completed:
-                            logger.info("Turn completed, stopping stream read")
-                            completion_event.set()
-                            break
+                        stderr_buffer.append(line.decode("utf-8", errors="replace"))
+                    except asyncio.TimeoutError:
+                        continue
 
-                async def read_stderr():
-                    while not completion_event.is_set():
-                        try:
-                            line = await asyncio.wait_for(
-                                proc.stderr.readline(),
-                                timeout=0.5
-                            )
-                            if not line:
-                                break
-                            stderr_buffer.append(line.decode("utf-8", errors="replace"))
-                        except asyncio.TimeoutError:
-                            continue
+            async def wait_for_completion():
+                await asyncio.gather(read_stream(), read_stderr())
+                # Terminate process after completion (it may not exit on its own)
+                if parser.result.completed:
+                    logger.info("Terminating codex process after completion")
+                    await self._terminate_process(proc)
 
-                async def wait_for_completion():
-                    await asyncio.gather(read_stream(), read_stderr())
-                    # Terminate process after completion (it may not exit on its own)
-                    if parser.result.completed:
-                        logger.info("Terminating codex process after completion")
-                        await self._terminate_process(proc)
-
-                await asyncio.wait_for(wait_for_completion(), timeout=timeout)
-
-            except asyncio.TimeoutError:
-                await self._terminate_process(proc)
-                partial_output = "".join(stdout_buffer)
-                raise CodexTimeoutError(timeout, partial_output)
+            await wait_for_completion()
 
             # Check exit code
             if proc.returncode != 0:
@@ -292,8 +273,6 @@ class CodexExecRunner:
 
             return parser.get_result()
 
-        except (asyncio.TimeoutError, CodexTimeoutError):
-            raise
         except CodexExecutionError:
             raise
         except Exception as e:
@@ -306,7 +285,6 @@ async def run_codex(
     cwd: str | None = None,
     sandbox: str = DEFAULT_SANDBOX,
     model: str | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Execute a new codex session."""
     runner = CodexExecRunner()
@@ -315,7 +293,6 @@ async def run_codex(
         cwd=cwd,
         sandbox=sandbox,
         model=model,
-        timeout=timeout,
     )
 
     # Create session if we got a thread_id
@@ -344,7 +321,6 @@ async def run_codex(
 async def run_codex_reply(
     thread_id: str,
     prompt: str,
-    timeout: int = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Continue an existing codex session."""
     session_manager = get_session_manager()
@@ -367,7 +343,6 @@ async def run_codex_reply(
         cwd=cwd,
         sandbox=sandbox,
         model=model,
-        timeout=timeout,
         thread_id=thread_id,
     )
 

@@ -15,15 +15,6 @@ class CodexExecutionError(CodexMCPError):
         self.stderr = stderr
 
 
-class CodexTimeoutError(CodexMCPError):
-    """Raised when codex exec times out."""
-
-    def __init__(self, timeout: int, partial_output: str | None = None):
-        super().__init__(f"Codex execution timed out after {timeout} seconds")
-        self.timeout = timeout
-        self.partial_output = partial_output
-
-
 class SessionNotFoundError(CodexMCPError):
     """Raised when attempting to resume a non-existent session."""
 

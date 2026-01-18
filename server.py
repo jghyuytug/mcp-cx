@@ -13,10 +13,9 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from config import DEFAULT_SANDBOX, DEFAULT_TIMEOUT, SANDBOX_MODES, LOG_LEVEL
+from config import DEFAULT_SANDBOX, SANDBOX_MODES, LOG_LEVEL
 from errors import (
     CodexExecutionError,
-    CodexTimeoutError,
     CodexMCPError,
     SessionNotFoundError,
 )
@@ -66,11 +65,6 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional model name override (e.g., 'gpt-4o', 'o3-mini')",
                     },
-                    "timeout": {
-                        "type": "integer",
-                        "default": DEFAULT_TIMEOUT,
-                        "description": f"Timeout in seconds (default: {DEFAULT_TIMEOUT})",
-                    },
                 },
                 "required": ["prompt"],
             },
@@ -93,11 +87,6 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "The follow-up message or question",
                     },
-                    "timeout": {
-                        "type": "integer",
-                        "default": DEFAULT_TIMEOUT,
-                        "description": f"Timeout in seconds (default: {DEFAULT_TIMEOUT})",
-                    },
                 },
                 "required": ["threadId", "prompt"],
             },
@@ -117,13 +106,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 cwd=arguments.get("cwd"),
                 sandbox=arguments.get("sandbox", DEFAULT_SANDBOX),
                 model=arguments.get("model"),
-                timeout=arguments.get("timeout", DEFAULT_TIMEOUT),
             )
         elif name == "codex-reply":
             result = await run_codex_reply(
                 thread_id=arguments["threadId"],
                 prompt=arguments["prompt"],
-                timeout=arguments.get("timeout", DEFAULT_TIMEOUT),
             )
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
@@ -144,13 +131,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         logger.info(f"Tool response length: {len(response_text)}")
 
         return [TextContent(type="text", text=response_text)]
-
-    except CodexTimeoutError as e:
-        logger.error(f"Timeout error: {e}")
-        error_msg = f"**Timeout Error:** Codex execution timed out after {e.timeout} seconds."
-        if e.partial_output:
-            error_msg += f"\n\n**Partial Output:**\n{e.partial_output[:1000]}..."
-        return [TextContent(type="text", text=error_msg)]
 
     except SessionNotFoundError as e:
         logger.error(f"Session not found: {e}")
