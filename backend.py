@@ -39,21 +39,19 @@ class CodexExecRunner:
 
     def _build_command(
         self,
-        prompt: str,
-        cwd: str,
         sandbox: str,
         model: str | None,
         thread_id: str | None = None,
     ) -> list[str]:
-        """Build the codex exec command."""
+        """Build the codex exec command. Prompt is passed via stdin for UTF-8 support."""
         cmd = [str(self.codex_path), "exec"]
 
         if thread_id:
-            # Resume mode: different argument order, no sandbox/model flags
-            cmd.extend(["resume", "--json", "--skip-git-repo-check", thread_id, prompt])
+            # Resume mode: use stdin (-) for prompt
+            cmd.extend(["resume", "--json", "--skip-git-repo-check", thread_id, "-"])
         else:
-            # New session mode
-            cmd.append(prompt)
+            # New session mode - use stdin (-) for prompt
+            cmd.append("-")  # Read prompt from stdin
             cmd.append("--json")
             cmd.append("--skip-git-repo-check")
 
@@ -107,32 +105,49 @@ class CodexExecRunner:
         cwd = cwd or str(Path.cwd())
         timeout = timeout or self.default_timeout
 
-        cmd = self._build_command(prompt, cwd, sandbox, model, thread_id)
+        cmd = self._build_command(sandbox, model, thread_id)
         logger.info(f"Executing: {' '.join(cmd)}")
         logger.info(f"Working directory: {cwd}")
+        logger.info(f"Prompt (first 200 chars): {prompt[:200]}...")
 
         parser = JsonlParser()
         stdout_buffer = []
         stderr_buffer = []
 
+        # Set UTF-8 environment
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        if sys.platform == "win32":
+            env["PYTHONUTF8"] = "1"
+
         try:
-            # Create subprocess
+            # Create subprocess with stdin pipe for prompt
             if sys.platform == "win32":
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
+                    env=env,
                     creationflags=0x08000000,  # CREATE_NO_WINDOW
                 )
             else:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
+                    env=env,
                     start_new_session=True,
                 )
+
+            # Write prompt to stdin (UTF-8 encoded)
+            proc.stdin.write(prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+            await proc.stdin.wait_closed()
 
             # Read output with timeout
             try:

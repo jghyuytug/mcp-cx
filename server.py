@@ -22,11 +22,11 @@ from errors import (
 )
 from backend import run_codex, run_codex_reply
 
-# Configure logging
+# Configure logging with UTF-8 encoding
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler(Path.home() / ".codex-mcp-server.log")],
+    handlers=[logging.FileHandler(Path.home() / ".codex-mcp-server.log", encoding="utf-8")],
 )
 logger = logging.getLogger(__name__)
 
