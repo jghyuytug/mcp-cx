@@ -134,6 +134,8 @@ class CodexExecRunner:
 
             # Read output with timeout
             try:
+                completion_event = asyncio.Event()
+
                 async def read_stream():
                     while True:
                         line = await proc.stdout.readline()
@@ -143,18 +145,33 @@ class CodexExecRunner:
                         stdout_buffer.append(decoded)
                         parser.parse_line(decoded)
                         logger.debug(f"JSONL: {decoded.strip()}")
+                        # Stop reading once turn is completed
+                        if parser.result.completed:
+                            logger.info("Turn completed, stopping stream read")
+                            completion_event.set()
+                            break
 
                 async def read_stderr():
-                    while True:
-                        line = await proc.stderr.readline()
-                        if not line:
-                            break
-                        stderr_buffer.append(line.decode("utf-8", errors="replace"))
+                    while not completion_event.is_set():
+                        try:
+                            line = await asyncio.wait_for(
+                                proc.stderr.readline(),
+                                timeout=0.5
+                            )
+                            if not line:
+                                break
+                            stderr_buffer.append(line.decode("utf-8", errors="replace"))
+                        except asyncio.TimeoutError:
+                            continue
 
-                await asyncio.wait_for(
-                    asyncio.gather(read_stream(), read_stderr(), proc.wait()),
-                    timeout=timeout,
-                )
+                async def wait_for_completion():
+                    await asyncio.gather(read_stream(), read_stderr())
+                    # Terminate process after completion (it may not exit on its own)
+                    if parser.result.completed:
+                        logger.info("Terminating codex process after completion")
+                        await self._terminate_process(proc)
+
+                await asyncio.wait_for(wait_for_completion(), timeout=timeout)
 
             except asyncio.TimeoutError:
                 await self._terminate_process(proc)
