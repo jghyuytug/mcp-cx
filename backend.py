@@ -8,7 +8,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from config import CODEX_EXE_PATH, DEFAULT_SANDBOX, DEFAULT_TIMEOUT, SANDBOX_MODES
+from config import (
+    CODEX_EXE_PATH,
+    DEFAULT_SANDBOX,
+    DEFAULT_TIMEOUT,
+    SANDBOX_MODES,
+    MAX_RETRIES,
+    RETRY_DELAY,
+)
 from errors import (
     CodexExecutionError,
     CodexTimeoutError,
@@ -18,6 +25,26 @@ from jsonl_parser import JsonlParser, ParsedResult
 from session_manager import Session, get_session_manager
 
 logger = logging.getLogger(__name__)
+
+# Error patterns that indicate a retryable disconnection
+RETRYABLE_ERROR_PATTERNS = [
+    "Reconnecting",
+    "stream disconnected",
+    "stream closed",
+    "connection reset",
+    "connection refused",
+    "network error",
+]
+
+
+def _is_retryable_error(errors: list[str]) -> bool:
+    """Check if the errors indicate a retryable disconnection."""
+    for error in errors:
+        error_lower = error.lower()
+        for pattern in RETRYABLE_ERROR_PATTERNS:
+            if pattern.lower() in error_lower:
+                return True
+    return False
 
 
 class CodexExecRunner:
@@ -98,12 +125,67 @@ class CodexExecRunner:
         timeout: int | None = None,
         thread_id: str | None = None,
     ) -> ParsedResult:
-        """Execute codex and return parsed result."""
+        """Execute codex with automatic retry on disconnection."""
         if sandbox not in SANDBOX_MODES:
             raise InvalidSandboxModeError(sandbox, SANDBOX_MODES)
 
         cwd = cwd or str(Path.cwd())
         timeout = timeout or self.default_timeout
+
+        last_error = None
+        last_result = None
+
+        for attempt in range(MAX_RETRIES + 1):
+            if attempt > 0:
+                logger.info(f"Retry attempt {attempt}/{MAX_RETRIES} after {RETRY_DELAY}s delay...")
+                await asyncio.sleep(RETRY_DELAY)
+
+            try:
+                result = await self._execute_once(prompt, cwd, sandbox, model, timeout, thread_id)
+
+                # Check if result has retryable errors but no completion
+                if result.errors and _is_retryable_error(result.errors) and not result.completed:
+                    logger.warning(f"Retryable error detected: {result.errors}")
+                    last_result = result
+                    last_error = CodexExecutionError(f"Retryable error: {result.errors}")
+                    continue
+
+                return result
+
+            except CodexTimeoutError as e:
+                logger.warning(f"Timeout on attempt {attempt + 1}: {e}")
+                last_error = e
+                # Don't retry on timeout - it's likely a persistent issue
+                raise
+
+            except CodexExecutionError as e:
+                logger.warning(f"Execution error on attempt {attempt + 1}: {e}")
+                last_error = e
+                # Check if it's a retryable error
+                if "retryable" in str(e).lower() or attempt < MAX_RETRIES:
+                    continue
+                raise
+
+        # All retries exhausted
+        if last_result and (last_result.agent_messages or last_result.thread_id):
+            logger.warning("Returning partial result after retries exhausted")
+            return last_result
+
+        if last_error:
+            raise last_error
+
+        raise CodexExecutionError("All retry attempts failed")
+
+    async def _execute_once(
+        self,
+        prompt: str,
+        cwd: str,
+        sandbox: str,
+        model: str | None,
+        timeout: int,
+        thread_id: str | None = None,
+    ) -> ParsedResult:
+        """Execute codex once (single attempt)."""
 
         cmd = self._build_command(sandbox, model, thread_id)
         logger.info(f"Executing: {' '.join(cmd)}")

@@ -12,7 +12,11 @@ CODEX_EXE_PATH = Path(
 )
 
 # Default timeout for codex exec (in seconds)
-DEFAULT_TIMEOUT = 300
+DEFAULT_TIMEOUT = 600
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds between retries
 
 # Sandbox modes
 SANDBOX_MODES = frozenset({"read-only", "workspace-write", "danger-full-access"})
