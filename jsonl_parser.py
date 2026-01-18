@@ -93,6 +93,15 @@ class JsonlParser:
 
         if item_type == "message":
             self._extract_message_content(item)
+        elif item_type == "agent_message":
+            # Direct agent message (simpler format)
+            text = item.get("text", "")
+            if text:
+                self.result.agent_messages.append(text)
+        elif item_type == "reasoning":
+            text = item.get("text", "")
+            if text:
+                self.result.reasoning.append(text)
         elif item_type == "function_call":
             self._extract_function_call(item)
         elif item_type == "function_call_output":

@@ -49,17 +49,19 @@ class CodexExecRunner:
         cmd = [str(self.codex_path), "exec"]
 
         if thread_id:
-            cmd.extend(["resume", thread_id])
+            # Resume mode: different argument order, no sandbox/model flags
+            cmd.extend(["resume", "--json", "--skip-git-repo-check", thread_id, prompt])
+        else:
+            # New session mode
+            cmd.append(prompt)
+            cmd.append("--json")
+            cmd.append("--skip-git-repo-check")
 
-        cmd.append(prompt)
-        cmd.append("--json")
-        cmd.append("--skip-git-repo-check")  # Allow non-git directories
+            if sandbox:
+                cmd.extend(["--sandbox", sandbox])
 
-        if sandbox:
-            cmd.extend(["--sandbox", sandbox])
-
-        if model:
-            cmd.extend(["--model", model])
+            if model:
+                cmd.extend(["--model", model])
 
         return cmd
 
